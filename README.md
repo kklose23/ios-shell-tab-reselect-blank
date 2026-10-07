@@ -1,9 +1,5 @@
 # iOS: re-tapping the selected Shell tab during a navigation leaves the tab blank
 
-> **Draft — not yet confirmed against this project.** The analysis below comes from a production app on
-> Microsoft.Maui.Controls 10.0.110. Run the steps here, then replace the "Actual" log with output from this project
-> before filing.
-
 ## Summary
 
 On iOS 26, tapping the already-selected tab of a Shell `TabBar` while a push or a pop-to-root is still animating
@@ -31,11 +27,15 @@ reproduces on the simulator.
 
 ## Steps to reproduce
 
-1. Run the project on the iOS Simulator.
-2. On **Home**, tap **Open child page**.
+1. Run the project on the iOS Simulator and turn on **Debug > Slow Animations** (⌘T) in the Simulator menu. It
+   stretches the push animation so the tap in step 3 is easy to land; without it the window is the normal slide-in,
+   a fraction of a second.
+2. On **Home**, tap **Open child page** once. The button sits directly above the Home tab.
 3. While the child page is still sliding in, tap the **Home** tab.
-4. Repeat steps 2–3 quickly. Also land some Home taps while the child page is sliding back *out* from an earlier
-   Home tap.
+4. If the tab isn't blank yet, repeat steps 2–3. Also land some Home taps while the child page is sliding back *out*
+   from an earlier Home tap.
+
+A single button tap is enough; a double tap is not needed.
 
 The `[Repro]` lines in the debug output show Shell's route, the page on screen and the stack after each
 navigation event.
@@ -46,14 +46,32 @@ Either the tab tap is ignored until the navigation finishes, or the tab pops cle
 
 ## Actual
 
-The tab goes blank and stays blank. In the first failure mode, Shell reports a route that still ends in the child
-page while its stack holds only the root page:
+The Home tab goes blank and stays blank, including after switching to **Other** and back. Output from this
+project:
 
 ```
-TODO: replace with output from this project
+[Repro] Navigated source=ShellItemChanged location='//HomePage' page='HomePage' stack='root'
 [Repro] Navigating source=Push target='ChildPage' location='//HomePage' page='HomePage' stack='root'
-[Repro] Navigated source=PopToRoot location='//HomePage/ChildPage' page='HomePage' stack='root'
+[Repro] Navigating source=Push target='ChildPage' location='//HomePage' page='HomePage' stack='root'
+[Repro] Navigated source=PopToRoot location='//HomePage' page='HomePage' stack='root'
+[Repro] Navigating source=ShellSectionChanged target='//HomePage' location='//HomePage' page='HomePage' stack='root'
+    (five more identical Home-tab re-selections)
+[Repro] Navigating source=ShellSectionChanged target='//OtherPage' location='//HomePage' page='HomePage' stack='root'
+[Repro] Navigated source=ShellSectionChanged location='//OtherPage' page='OtherPage' stack='root'
+[Repro] Navigating source=ShellSectionChanged target='//HomePage' location='//OtherPage' page='OtherPage' stack='root'
+[Repro] Navigated source=ShellSectionChanged location='//HomePage' page='HomePage' stack='root'
 ```
+
+Two things in it:
+
+- **The pop-to-root has no `Navigating`.** It is a Home-tab tap that landed during a push and was approved without
+  being proposed (cause 1 below). The tab taps after it, made once no push was in flight, each raise `Navigating`
+  as expected.
+- **The push never reports `Navigated source=Push`.** The only `Navigated` from that `GoToAsync` carries
+  `source=PopToRoot`.
+
+From then on Shell's own state is consistent (route `//HomePage`, page `HomePage`, stack `root`), yet the page is
+not on screen.
 
 ## Cause 1: tab selection is approved without `Navigating` during `GoToAsync`
 
@@ -87,8 +105,9 @@ while the pushed page is still animating in:
 
 `ShellSectionRenderer.PopToRootViewController` sees two view controllers and runs `ProcessPopToRoot`
 ([ShellSectionRenderer.cs#L552](https://github.com/dotnet/maui/blob/10.0.110/src/Controls/src/Core/Compatibility/Handlers/Shell/iOS/ShellSectionRenderer.cs#L552)),
-which resets the section's stack to the root page. The interrupted push then completes and records its route
-anyway, which gives the route-ends-in-`ChildPage`, stack-is-`root` state above. `DidPopItem`
+which resets the section's stack to the root page while the push is still in progress. In this project the result
+is the consistent-but-blank state above. In a larger app with a slower page, the interrupted push instead went on
+to record its route, which left Shell's route at `//HomePage/ChildPage` with only the root page on its stack. `DidPopItem`
 ([L139](https://github.com/dotnet/maui/blob/10.0.110/src/Controls/src/Core/Compatibility/Handlers/Shell/iOS/ShellSectionRenderer.cs#L139))
 then finds the navigation bar out of step with the stack, treats it as a swipe-back, and `SendPop` issues
 `GoToAsync("..")` from the root page.
